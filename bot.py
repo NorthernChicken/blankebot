@@ -57,7 +57,7 @@ PAGE1_PATH = BASE_DIR / "page1.html"
 PAGE2_PATH = BASE_DIR / "page2.html"
 DIFF_PATH = BASE_DIR / "differences.txt"
 
-delay = 3600
+delay = 5
 
 # Stats tracking
 start_time = time.time()
@@ -90,7 +90,8 @@ async def send_error_to_discord(error_message):
     except Exception as e:
         print(f"Error sending error to Discord: {e}")
 
-# Normalize HTML and remove anti-bot scripts and other things
+# Normalize HTML to extract and sort constituent names alphabetically by last name
+# Helped to elimate flase positives
 def normalize_html(html):
     soup = BeautifulSoup(html, 'html.parser')
     constituents = soup.find_all('div', class_='fsConstituentItem')
@@ -101,31 +102,29 @@ def normalize_html(html):
         asyncio.create_task(send_error_to_discord(error_message))
         return ""
     seen_ids = set()
-    unique_constituents = []
+    names = []
     for c in constituents:
         link = c.find('a', class_='fsConstituentProfileLink')
         if link and 'data-constituent-id' in link.attrs:
             cid = link['data-constituent-id']
-            if cid not in seen_ids:
+            name = link.get_text(strip=True)
+            if cid not in seen_ids and name:
                 seen_ids.add(cid)
-                unique_constituents.append(c)
-    print(f"After deduplication: {len(unique_constituents)} unique constituents")
-    html = '\n'.join(str(c) for c in unique_constituents)
-    html = html.replace('\r\n', '\n').replace('\r', '\n')
-    html = re.sub(r'<!--[\s\S]*?-->', '', html)
-    html = re.sub(r'nonce="[a-zA-Z0-9_-]+"', 'nonce=""', html)
-    html = re.sub(
-        r'<script>\(function\(\)\{function c\(\)\{var b=a\.contentDocument.*?</script>',
-        '',
-        html,
-        flags=re.DOTALL
+                names.append(name)
+    print(f"After deduplication: {len(names)} unique constituent names")
+    if not names:
+        error_message = "No valid constituent names found after deduplication."
+        print(f"Warning: {error_message}")
+        asyncio.create_task(send_error_to_discord(error_message))
+        return ""
+    sorted_names = sorted(
+        names,
+        key=lambda x: (
+            x.split()[-1].lower(),
+            x.split()[0].lower() if len(x.split()) > 1 else ""
+        )
     )
-    html = re.sub(
-        r'window\.__CF\$cv\$params=\{r:.*?}',
-        'window.__CF$cv$params={}',
-        html
-    )
-    return html.strip()
+    return '\n'.join(sorted_names).strip()
 
 async def download_page1():
     global last_check_time, total_checks, last_check_success, current_page_hash, same_page_error
@@ -150,7 +149,7 @@ async def download_page1():
             html1 = normalize_html(await page.content())
             print(f"Downloaded page1 (page 1): {len(html1)} chars...")
             if not html1:
-                error_message = "No constituents found on page 1."
+                error_message = "No constituent names found on page 1."
                 print(f"Error: {error_message}")
                 await send_error_to_discord(error_message)
                 with open(PAGE1_PATH, "w", encoding="utf-8", newline='\n') as page1:
@@ -238,7 +237,7 @@ async def download_page2():
             html1 = normalize_html(await page.content())
             print(f"Downloaded page2 (page 1): {len(html1)} chars...")
             if not html1:
-                error_message = "No constituents found on page 1."
+                error_message = "No constituent names found on page 1."
                 print(f"Error: {error_message}")
                 await send_error_to_discord(error_message)
                 with open(PAGE2_PATH, "w", encoding="utf-8", newline='\n') as page2:
@@ -261,7 +260,7 @@ async def download_page2():
                     await page.wait_for_selector('div.fsConstituentItem', timeout=10000)
                     await asyncio.sleep(3)
                     html2 = normalize_html(await page.content())
-                    print(f"Downloaded page2 (page 2): {len(html2)} chars, {html2[:100]}...")
+                    print(f"Downloaded page2 (page 2): {len(html2)} chars...")
                     if html2:
                         break
                 except Exception as e:
@@ -343,7 +342,7 @@ def compare_pages(file1_path, file2_path, output_file):
     differ = difflib.Differ()
     diff = list(differ.compare(file1_lines, file2_lines))
 
-    # I was getting some fale-positives because of whitespace-only differences
+    # I was getting some false positives because of whitespace-only differences
     significant_diff = [line for line in diff if line.startswith(('- ', '+ ')) and line[2:].strip()]
 
     if not significant_diff:
@@ -431,7 +430,7 @@ async def on_ready():
 
 @bot.command(name="status", description="Get the current status and stats of the bot.")
 async def status(interaction: discord.Interaction):
-    await interaction.response.defer()  # Defer response since this might take a moment
+    await interaction.response.defer()
     embed = discord.Embed(title="📊 Blankebot Status", color=discord.Color.blue())
 
     # Uptime
