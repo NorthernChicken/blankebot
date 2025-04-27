@@ -8,13 +8,41 @@ import hashlib
 import re
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
+import sys
+import logging
+# Logging in log.txt
+class StreamToLogger:
+    def __init__(self, logger, log_level=logging.INFO):
+        self.logger = logger
+        self.log_level = log_level
+        self.linebuf = ''
 
-# Blankebot by NorthernChicken: https://github.com/NorthernChicken/blankebot
-# Uses Playwright to download HTML of pages 1 and 2, combines them, and checks for changes.
-# If changes are detected, it pings on Discord. Errors are sent to Discord.
-# Added /status command to show bot stats.
+    def write(self, buf):
+        for line in buf.rstrip().splitlines():
+            self.logger.log(self.log_level, line.rstrip())
+        sys.__stdout__.write(buf)  # console
+
+    def flush(self):
+        sys.__stdout__.flush()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('log.txt', mode='a', encoding='utf-8'),
+#        logging.StreamHandler(sys.__stdout__)
+    ]
+)
+logger = logging.getLogger()
+sys.stdout = StreamToLogger(logger, logging.INFO)
+sys.stderr = StreamToLogger(logger, logging.ERROR)
+
+'''
+Blankebot by NorthernChicken: https://github.com/NorthernChicken/blankebot
+Uses Playwright to download HTML of pages 1 and 2, combines them, and checks for changes.
+If changes are detected, it pings me on Discord.
+'''
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -29,7 +57,7 @@ PAGE1_PATH = BASE_DIR / "page1.html"
 PAGE2_PATH = BASE_DIR / "page2.html"
 DIFF_PATH = BASE_DIR / "differences.txt"
 
-delay = 5
+delay = 3600
 
 # Stats tracking
 start_time = time.time()
@@ -55,7 +83,7 @@ async def send_error_to_discord(error_message):
         if not channel:
             print("Error: Text channel not found for sending error.")
             return
-        await channel.send(f"⚠️ Error in blankebot: {error_message}")
+        await channel.send(f"⚠️ Error: {error_message}")
         print("Error sent to Discord.")
     except discord.errors.HTTPException as e:
         print(f"Discord API error while sending error: {e}")
@@ -100,7 +128,7 @@ def normalize_html(html):
     return html.strip()
 
 async def download_page1():
-    global last_check_time, total_checks, last_check_success, current_page_hash
+    global last_check_time, total_checks, last_check_success, current_page_hash, same_page_error
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
@@ -114,13 +142,13 @@ async def download_page1():
             pagination = await page.query_selector('div.fsElementPagination')
             if pagination:
                 pagination_html = await page.evaluate('(element) => element.outerHTML', pagination)
-                print(f"Pagination HTML: {pagination_html[:500]}...")
+                print(f"Pagination HTML found...")
             else:
                 error_message = "Pagination div not found."
                 print(f"Warning: {error_message}")
                 await send_error_to_discord(error_message)
             html1 = normalize_html(await page.content())
-            print(f"Downloaded page1 (page 1): {len(html1)} chars, {html1[:100]}...")
+            print(f"Downloaded page1 (page 1): {len(html1)} chars...")
             if not html1:
                 error_message = "No constituents found on page 1."
                 print(f"Error: {error_message}")
@@ -145,7 +173,7 @@ async def download_page1():
                     await page.wait_for_selector('div.fsConstituentItem', timeout=10000)
                     await asyncio.sleep(3)
                     html2 = normalize_html(await page.content())
-                    print(f"Downloaded page1 (page 2): {len(html2)} chars, {html2[:100]}...")
+                    print(f"Downloaded page1 (page 2): {len(html2)} chars...")
                     if html2:
                         break
                 except Exception as e:
@@ -163,10 +191,14 @@ async def download_page1():
                 await browser.close()
                 return
 
+            if html1 == html2:
+                same_page_error = True
+            else:
+                same_page_error = False
+
             combined_html = html1 + '\n' + html2
             current_page_hash = hashlib.md5(combined_html.encode('utf-8')).hexdigest()
             print(f"Combined page1 hash: {current_page_hash}")
-            print(f"Combined page1 preview: {combined_html[:100]}...")
             print(f"Combined page1 length: {len(combined_html)} chars")
 
             with open(PAGE1_PATH, "w", encoding="utf-8", newline='\n') as page1:
@@ -174,7 +206,7 @@ async def download_page1():
             file_size = PAGE1_PATH.stat().st_size
             print(f"Page1 file size: {file_size} bytes")
             await browser.close()
-        last_check_time = datetime.utcnow()
+        last_check_time = datetime.now(timezone.utc)
         total_checks += 1
         last_check_success = True
     except Exception as e:
@@ -184,7 +216,7 @@ async def download_page1():
         await send_error_to_discord(error_message)
 
 async def download_page2():
-    global last_check_time, total_checks, last_check_success, current_page_hash
+    global last_check_time, total_checks, last_check_success, current_page_hash, same_page_error
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch()
@@ -198,13 +230,13 @@ async def download_page2():
             pagination = await page.query_selector('div.fsElementPagination')
             if pagination:
                 pagination_html = await page.evaluate('(element) => element.outerHTML', pagination)
-                print(f"Pagination HTML: {pagination_html[:500]}...")
+                print(f"Pagination HTML detected...")
             else:
                 error_message = "Pagination div not found."
                 print(f"Warning: {error_message}")
                 await send_error_to_discord(error_message)
             html1 = normalize_html(await page.content())
-            print(f"Downloaded page2 (page 1): {len(html1)} chars, {html1[:100]}...")
+            print(f"Downloaded page2 (page 1): {len(html1)} chars...")
             if not html1:
                 error_message = "No constituents found on page 1."
                 print(f"Error: {error_message}")
@@ -247,10 +279,14 @@ async def download_page2():
                 await browser.close()
                 return
 
+            if html1 == html2:
+                same_page_error = True
+            else:
+                same_page_error = False
+
             combined_html = html1 + '\n' + html2
             current_page_hash = hashlib.md5(combined_html.encode('utf-8')).hexdigest()
             print(f"Combined page2 hash: {current_page_hash}")
-            print(f"Combined page2 preview: {combined_html[:100]}...")
             print(f"Combined page2 length: {len(combined_html)} chars")
 
             with open(PAGE2_PATH, "w", encoding="utf-8", newline='\n') as page2:
@@ -258,7 +294,7 @@ async def download_page2():
             file_size = PAGE2_PATH.stat().st_size
             print(f"Page2 file size: {file_size} bytes")
             await browser.close()
-        last_check_time = datetime.utcnow()
+        last_check_time = datetime.now(timezone.utc)
         total_checks += 1
         last_check_success = True
     except Exception as e:
@@ -373,6 +409,10 @@ async def main():
                     changes = diff.read()
                 await notify_on_change(changes)
 
+            if same_page_error:
+                error_message = "Pagination may have failed, a false positive may have been reported."
+                await send_error_to_discord(error_message)
+
             if PAGE2_PATH.exists():
                 if PAGE1_PATH.exists():
                     PAGE1_PATH.unlink()
@@ -400,7 +440,7 @@ async def status(interaction: discord.Interaction):
     # Last Check Time
     if last_check_time:
         last_check_str = last_check_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-        time_since_last = (datetime.utcnow() - last_check_time).total_seconds()
+        time_since_last = (datetime.now(timezone.utc) - last_check_time).total_seconds()
         time_since_str = f"{int(time_since_last // 3600)}h {int((time_since_last % 3600) // 60)}m {int(time_since_last % 60)}s ago"
         embed.add_field(name="Last Check", value=f"{last_check_str} ({time_since_str})", inline=False)
     else:
@@ -409,9 +449,9 @@ async def status(interaction: discord.Interaction):
     # Next Check Time
     if last_check_time:
         next_check = last_check_time + timedelta(seconds=delay)
-        if datetime.utcnow() < next_check:
+        if datetime.now(timezone.utc) < next_check:
             next_check_str = next_check.strftime("%Y-%m-%d %H:%M:%S UTC")
-            time_until_next = (next_check - datetime.utcnow()).total_seconds()
+            time_until_next = (next_check - datetime.now(timezone.utc)).total_seconds()
             time_until_str = f"in {int(time_until_next // 60)}m {int(time_until_next % 60)}s"
             embed.add_field(name="Next Check", value=f"{next_check_str} ({time_until_str})", inline=False)
         else:
